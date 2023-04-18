@@ -1,11 +1,10 @@
 import Emote from '../emotes/emote.js';
-import {hasFlag} from '../../utils/flags.js';
 
 function emoteUrl(id, version, static_ = false) {
   return `https://cdn.7tv.app/emote/${encodeURIComponent(id)}/${version}${static_ ? '_static' : ''}.webp`;
 }
 
-export function createEmote(id, code, animated, owner, category) {
+export default function createEmote(id, code, animated, owner, category) {
   return new Emote({
     id,
     category,
@@ -25,8 +24,4 @@ export function createEmote(id, code, animated, owner, category) {
       '4x_static': animated ? emoteUrl(id, '4x', true) : undefined,
     },
   });
-}
-
-export function isUnlisted(visibility) {
-  return hasFlag(visibility, 1 << 2) || hasFlag(visibility, 1 << 8);
 }

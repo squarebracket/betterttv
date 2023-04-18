@@ -2,7 +2,7 @@ import ReconnectingEventSource from 'reconnecting-eventsource';
 import watcher from '../../watcher.js';
 import settings from '../../settings.js';
 import AbstractEmotes from '../emotes/abstract-emotes.js';
-import {createEmote, isUnlisted} from './utils.js';
+import createEmote from './utils.js';
 import {EmoteCategories, EmoteProviders, EmoteTypeFlags, SettingIds} from '../../constants.js';
 import {hasFlag} from '../../utils/flags.js';
 import {getCurrentChannel} from '../../utils/channel.js';
@@ -46,7 +46,14 @@ class SevenTVChannelEmotes extends AbstractEmotes {
       `https://7tv.io/v3/users/${encodeURIComponent(currentChannel.provider)}/${encodeURIComponent(currentChannel.id)}`
     )
       .then((response) => response.json())
-      .then(({emote_set: emoteSet}) => {
+      .then(({emote_set: emoteSet, user: {id: userId}}) => {
+        const currentEmoteSet = emoteSet.id;
+
+        eventSource = new ReconnectingEventSource(
+          `https://events.7tv.io/v3@emote_set.update<object_id=${currentEmoteSet}>,user.update<object_id=${userId}>`
+        );
+        eventSource.addEventListener('dispatch', (event) => this.handleEventSourceUpdate(event));
+
         const {emotes} = emoteSet ?? {};
         if (emotes == null) {
           return;
@@ -66,58 +73,47 @@ class SevenTVChannelEmotes extends AbstractEmotes {
       })
       .then(() => watcher.emit('emotes.updated'));
 
-    eventSource = new ReconnectingEventSource(
-      `https://events.7tv.app/v1/channel-emotes?channel=${encodeURIComponent(currentChannel.name)}`
-    );
-    eventSource.addEventListener('update', (event) => this.handleEventSourceUpdate(event));
-
     window.testUpdate = (event) => this.handleEventSourceUpdate(event);
   }
 
   handleEventSourceUpdate(event) {
-    const {channel: channelName, emote_id: id, name: code, action, emote} = JSON.parse(event.data);
+    const {type, body} = JSON.parse(event.data);
 
     const currentChannel = getCurrentChannel();
     if (!currentChannel) {
       return;
     }
 
-    if (channelName !== currentChannel.name) {
+    if (type === 'user.update') {
+      // user changed emote set, so reload all emotes
+      this.updateChannelEmotes();
       return;
     }
 
     let message;
-    switch (action) {
-      case 'ADD': {
-        if (isUnlisted(emote.visibility)) {
+    if (body.pushed) {
+      // emote added
+      body.pushed.forEach((data) => {
+        const emote = data.value.data;
+        if (!emote.listed) {
           return;
         }
 
-        this.emotes.set(code, createEmote(id, code, emote.animated, emote.owner, category));
+        // if the emote was given a custom name, it only shows in data.value.name
+        const code = data.value.name;
+        this.emotes.set(code, createEmote(emote.id, code, emote.animated, emote.owner, category));
 
         message = formatMessage(
           {defaultMessage: '7TV Emotes: {emoteCode} has been added to chat'},
           {emoteCode: `${code} \u200B \u200B${code}\u200B`}
         );
-        break;
-      }
-      case 'UPDATE': {
-        const existingEmote = this.getEligibleEmoteById(id);
-        if (existingEmote == null) {
-          return;
-        }
-
-        this.emotes.delete(existingEmote.code);
-
-        if (isUnlisted(emote.visibility)) {
-          return;
-        }
-
-        this.emotes.set(code, createEmote(id, code, emote.animated, emote.owner, category));
-        break;
-      }
-      case 'REMOVE': {
-        const existingEmote = this.getEligibleEmoteById(id);
+      });
+    }
+    if (body.pulled) {
+      // emote removed
+      body.pulled.forEach((data) => {
+        const emote = data.old_value;
+        const existingEmote = this.getEligibleEmoteById(emote.id);
         if (existingEmote == null) {
           return;
         }
@@ -128,10 +124,28 @@ class SevenTVChannelEmotes extends AbstractEmotes {
           {defaultMessage: '7TV Emotes: {emoteCode} has been removed from chat'},
           {emoteCode: `\u200B${existingEmote.code}\u200B`}
         );
-        break;
-      }
-      default:
-        return;
+      });
+    }
+    if (body.updated) {
+      // emote renamed
+      body.updated.forEach((data) => {
+        const oldEmote = data.old_value;
+        const emote = data.value.data;
+        const existingEmote = this.getEligibleEmoteById(oldEmote.id);
+        if (existingEmote == null) {
+          return;
+        }
+
+        this.emotes.delete(existingEmote.code);
+
+        if (!emote.listed) {
+          return;
+        }
+
+        // if the emote was given a custom name, it only shows in data.value.name
+        const code = data.value.name;
+        this.emotes.set(code, createEmote(emote.id, code, emote.animated, emote.owner, category));
+      });
     }
 
     watcher.emit('emotes.updated');
